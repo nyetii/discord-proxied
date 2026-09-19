@@ -2,6 +2,7 @@ Implemented:
 
 - Install.ps1
 - Uninstall.ps1
+- Update.ps1 — Copies the updated **Start-DiscordProxied.ps1** into DiscordProxied's %LOCALAPPDATA% folder.
 - Start-DiscordProxied.ps1 — launcher helper installed automatically.
 
 Key behavior:

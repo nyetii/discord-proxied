@@ -19,6 +19,7 @@ $LauncherSourcePath = Join-Path $PSScriptRoot 'Start-DiscordProxied.ps1'
 $LauncherPath = Join-Path $InstallRoot 'Start-DiscordProxied.ps1'
 $StatePath = Join-Path $InstallRoot 'install-state.json'
 $DiscordUpdatePath = Join-Path $LocalAppData 'Discord\Update.exe'
+$DiscordIconPath = Join-Path $LocalAppData 'Discord\app.ico'
 $ShortcutPath = Join-Path $DesktopFolder 'Discord Proxied.lnk'
 
 function Write-Step {
@@ -338,6 +339,49 @@ function Test-DiscordProxyConfig {
     }
 }
 
+function Get-DiscordAppUserModelId {
+    $fallbackAppId = 'com.squirrel.Discord.Discord'
+    $shell = $null
+
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $startMenuRoots = @(
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonPrograms)
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Container) }
+
+        foreach ($root in $startMenuRoots) {
+            $links = @(Get-ChildItem -LiteralPath $root -Filter 'Discord.lnk' -File -Recurse -ErrorAction SilentlyContinue)
+            foreach ($link in $links) {
+                $folder = $shell.Namespace($link.DirectoryName)
+                if ($null -eq $folder) {
+                    continue
+                }
+
+                $item = $folder.ParseName($link.Name)
+                if ($null -eq $item) {
+                    continue
+                }
+
+                $appId = [string]$item.ExtendedProperty('System.AppUserModel.ID')
+                if (-not [string]::IsNullOrWhiteSpace($appId)) {
+                    return $appId
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Discord's notification identity could not be detected; using '$fallbackAppId'."
+    }
+    finally {
+        if ($null -ne $shell) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+        }
+    }
+
+    return $fallbackAppId
+}
+
 function New-DiscordProxyShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -353,9 +397,9 @@ function New-DiscordProxyShortcut {
     try {
         $shortcut = $shell.CreateShortcut($Path)
         $shortcut.TargetPath = $windowsPowerShell
-        $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $TargetScript
+        $shortcut.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $TargetScript
         $shortcut.WorkingDirectory = Split-Path -Parent $TargetScript
-        $shortcut.IconLocation = "$DiscordUpdatePath,0"
+        $shortcut.IconLocation = "$DiscordIconPath,0"
         $shortcut.Description = 'Start Discord through the sing-box proxy'
         $shortcut.Save()
     }
@@ -375,6 +419,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $DiscordUpdatePath -PathType Leaf)) {
         throw "Discord's updater was not found at '$DiscordUpdatePath'. Install Discord before running this installer."
+    }
+    if (-not (Test-Path -LiteralPath $DiscordIconPath -PathType Leaf)) {
+        throw "Discord's shortcut icon was not found at '$DiscordIconPath'. Install or repair Discord before running this installer."
     }
     if (-not (Test-Path -LiteralPath $LauncherSourcePath -PathType Leaf)) {
         throw "The launcher script was not found at '$LauncherSourcePath'."
@@ -418,13 +465,17 @@ try {
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     Copy-Item -LiteralPath $LauncherSourcePath -Destination $LauncherPath -Force
 
+    $discordAppUserModelId = Get-DiscordAppUserModelId
+
     $state = [ordered]@{
-        schema_version          = 1
-        config_path             = $ConfigPath
-        discord_update_path     = $DiscordUpdatePath
-        sing_box_path           = $singBoxPath
-        sing_box_install_method = $singBoxInstallMethod
-        shortcut_path           = $ShortcutPath
+        schema_version            = 2
+        config_path               = $ConfigPath
+        discord_update_path       = $DiscordUpdatePath
+        discord_icon_path         = $DiscordIconPath
+        discord_app_user_model_id = $discordAppUserModelId
+        sing_box_path             = $singBoxPath
+        sing_box_install_method   = $singBoxInstallMethod
+        shortcut_path             = $ShortcutPath
     }
     $stateJson = $state | ConvertTo-Json
     $utf8WithoutBom = New-Object Text.UTF8Encoding($false)

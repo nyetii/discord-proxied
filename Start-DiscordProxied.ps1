@@ -1,7 +1,7 @@
 #requires -Version 5.1
 
 [CmdletBinding()]
-param()
+param([switch]$ElevatedWorker)
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
@@ -14,61 +14,119 @@ function Test-Administrator {
 
 function Start-ElevatedCopy {
     $windowsPowerShell = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
-    Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -Verb RunAs -WorkingDirectory $PSScriptRoot | Out-Null
+    $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ElevatedWorker' -f $PSCommandPath
+    return Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -WorkingDirectory $PSScriptRoot -PassThru
 }
 
-function Wait-ForDiscordStartup {
+function Show-NativeToast {
     param(
-        [int]$StableSeconds = 30,
-        [int]$TimeoutSeconds = 180
+        [Parameter(Mandatory = $true)][string]$AppUserModelId,
+        [Parameter(Mandatory = $true)][string]$Message
     )
 
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $lastNewestStartTime = $null
-    $stableSince = $null
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $discordProcesses = @(Get-Process -Name 'Discord', 'DiscordCanary', 'DiscordPTB' -ErrorAction SilentlyContinue)
-        $startTimes = @($discordProcesses | ForEach-Object {
-                try { $_.StartTime.ToUniversalTime() } catch { $null }
-            } | Where-Object { $null -ne $_ })
-
-        if ($startTimes.Count -gt 0) {
-            $newestStartTime = @($startTimes | Sort-Object -Descending)[0]
-            if ($null -eq $lastNewestStartTime -or $newestStartTime -ne $lastNewestStartTime) {
-                $lastNewestStartTime = $newestStartTime
-                $stableSince = [DateTime]::UtcNow
-            }
-            elseif ($null -ne $stableSince -and ([DateTime]::UtcNow - $stableSince).TotalSeconds -ge $StableSeconds) {
-                return
-            }
-        }
-        else {
-            $lastNewestStartTime = $null
-            $stableSince = $null
-        }
-
-        Start-Sleep -Seconds 1
-    }
-
-    throw "Discord did not remain running for $StableSeconds seconds within the $TimeoutSeconds-second startup timeout."
+    $title = [Security.SecurityElement]::Escape('Discord Proxy has been disabled')
+    $escapedMessage = [Security.SecurityElement]::Escape($Message)
+    $toastXml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $toastXml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$title</text><text>$escapedMessage</text></binding></visual></toast>")
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($toastXml)
+    $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppUserModelId)
+    $notifier.Show($toast)
 }
 
-if (-not (Test-Administrator)) {
+function Wait-ForDiscordRpcPort {
+    param([Parameter(Mandatory = $true)][Diagnostics.Process]$SingBoxProcess)
+
+    if ($null -eq (Get-Command 'Get-NetTCPConnection' -ErrorAction SilentlyContinue)) {
+        throw 'Get-NetTCPConnection is unavailable, so Discord RPC readiness cannot be detected.'
+    }
+
+    $rpcPorts = [uint16[]](6463..6472)
+    $discordProcessNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
+
+    while ($true) {
+        if ($SingBoxProcess.HasExited) {
+            throw 'sing-box stopped while waiting for Discord to open its RPC port.'
+        }
+
+        $connections = @(Get-NetTCPConnection -LocalPort $rpcPorts -State Listen -ErrorAction SilentlyContinue)
+        foreach ($connection in $connections) {
+            $owner = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
+            if ($null -ne $owner -and $discordProcessNames -contains $owner.ProcessName) {
+                return $connection.LocalPort
+            }
+        }
+
+        Start-Sleep -Milliseconds 5000
+    }
+}
+
+$statePath = Join-Path $PSScriptRoot 'install-state.json'
+$defaultToastAppId = 'com.squirrel.Discord.Discord'
+$toastAppId = $defaultToastAppId
+
+if (Test-Path -LiteralPath $statePath -PathType Leaf) {
     try {
-        Start-ElevatedCopy
+        $notificationState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        if (-not [string]::IsNullOrWhiteSpace([string]$notificationState.discord_app_user_model_id)) {
+            $toastAppId = [string]$notificationState.discord_app_user_model_id
+        }
     }
     catch {
-        Write-Host "Administrator permission is required to start the sing-box TUN interface. $($_.Exception.Message)" -ForegroundColor Red
-        Read-Host 'Press Enter to close this window' | Out-Null
+        $toastAppId = $defaultToastAppId
+    }
+}
+
+$showToastInCurrentProcess = $true
+
+if (-not $ElevatedWorker -and -not (Test-Administrator)) {
+    $workerSucceeded = $false
+    try {
+        $workerProcess = Start-ElevatedCopy
+        $workerProcess.WaitForExit()
+        $workerSucceeded = $workerProcess.ExitCode -eq 0
+    }
+    catch {
+        $workerSucceeded = $false
+    }
+
+    $workerNotificationMessage = if ($workerSucceeded) {
+        'Discord has been successfully open using the proxied location'
+    }
+    else {
+        'An error happened so Discord might have been opened locally'
+    }
+
+    try {
+        Show-NativeToast -AppUserModelId $toastAppId -Message $workerNotificationMessage
+    }
+    catch {
+        try {
+            $toastLogPath = Join-Path $PSScriptRoot 'launcher-error.log'
+            $toastLogLine = '{0:u} Native notification failed: {1}{2}' -f [DateTime]::Now, $_.Exception.Message, [Environment]::NewLine
+            [IO.File]::AppendAllText($toastLogPath, $toastLogLine)
+        }
+        catch {
+            # Nothing else can be displayed from the hidden launcher.
+        }
     }
     exit
 }
 
-$statePath = Join-Path $PSScriptRoot 'install-state.json'
+if (-not (Test-Administrator)) {
+    exit 1
+}
+
+if ($ElevatedWorker) {
+    $showToastInCurrentProcess = $false
+}
+
 $singBoxProcess = $null
 $failureMessage = $null
+$succeeded = $false
 
 try {
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
@@ -106,7 +164,8 @@ try {
     }
 
     Start-Process -FilePath $discordUpdatePath -ArgumentList '--processStart Discord.exe' | Out-Null
-    Wait-ForDiscordStartup -StableSeconds 30 -TimeoutSeconds 180
+    $rpcPort = Wait-ForDiscordRpcPort -SingBoxProcess $singBoxProcess
+    $succeeded = $true
 }
 catch {
     $failureMessage = $_.Exception.Message
@@ -115,17 +174,54 @@ finally {
     if ($null -ne $singBoxProcess) {
         try {
             if (-not $singBoxProcess.HasExited) {
-                Stop-Process -Id $singBoxProcess.Id -Force -ErrorAction SilentlyContinue
-                $singBoxProcess.WaitForExit(5000) | Out-Null
+                Stop-Process -Id $singBoxProcess.Id -Force -ErrorAction Stop
+                if (-not $singBoxProcess.WaitForExit(5000)) {
+                    throw 'sing-box did not stop within five seconds.'
+                }
             }
         }
         catch {
-            Write-Warning "Could not stop sing-box cleanly: $($_.Exception.Message)"
+            $succeeded = $false
+            $failureMessage = "Could not stop sing-box cleanly: $($_.Exception.Message)"
         }
     }
 }
 
 if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
-    Write-Host $failureMessage -ForegroundColor Red
-    Read-Host 'Press Enter to close this window' | Out-Null
+    try {
+        $launcherLogPath = Join-Path $PSScriptRoot 'launcher-error.log'
+        $logLine = '{0:u} {1}{2}' -f [DateTime]::Now, $failureMessage, [Environment]::NewLine
+        [IO.File]::AppendAllText($launcherLogPath, $logLine)
+    }
+    catch {
+        # Logging is best effort because the launcher has no visible console.
+    }
 }
+
+$notificationMessage = if ($succeeded) {
+    'Discord has been successfully open using the proxied location'
+}
+else {
+    'An error happened so Discord might have been opened locally'
+}
+
+if ($showToastInCurrentProcess) {
+    try {
+        Show-NativeToast -AppUserModelId $toastAppId -Message $notificationMessage
+    }
+    catch {
+        try {
+            $toastLogPath = Join-Path $PSScriptRoot 'launcher-error.log'
+            $toastLogLine = '{0:u} Native notification failed: {1}{2}' -f [DateTime]::Now, $_.Exception.Message, [Environment]::NewLine
+            [IO.File]::AppendAllText($toastLogPath, $toastLogLine)
+        }
+        catch {
+            # Nothing else can be displayed from the hidden launcher.
+        }
+    }
+}
+
+if ($succeeded) {
+    exit 0
+}
+exit 1
