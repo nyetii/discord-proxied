@@ -1,0 +1,60 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "strict_route": false,
+      "dns_mode": "disabled"
+    }
+  ],
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "discord-vpn",
+      "address": [
+        "10.77.0.2/32"
+      ],
+      "private_key": "<INSERT PRIVATE KEY HERE>",
+      "peers": [
+        {
+          "address": "<INSERT SERVER IP ADDRESS HERE>",
+          "port": 51820,
+          "public_key": "<INSERT PUBLIC KEY HERE>",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "rules": [
+      {
+        "process_name": [
+          "Discord.exe",
+          "discord.exe",
+          "DiscordCanary.exe",
+          "DiscordPTB.exe"
+        ],
+        "action": "route",
+        "outbound": "discord-vpn"
+      }
+    ],
+    "final": "direct"
+  }
+}
