@@ -225,6 +225,17 @@ function Read-ServerAddress {
     } while ($true)
 }
 
+function Read-UserAddress {
+    do {
+        $value = Read-RequiredValue -Prompt 'User IP address'
+        $parsedAddress = $null
+        if ([Net.IPAddress]::TryParse($value, [ref]$parsedAddress)) {
+            return $parsedAddress.ToString()
+        }
+        Write-Warning 'Enter a valid IPv4 or IPv6 address.'
+    } while ($true)
+}
+
 function Test-WireGuardKey {
     param([Parameter(Mandatory = $true)][string]$Value)
 
@@ -275,6 +286,7 @@ function New-DiscordProxyConfig {
     Write-Step 'Creating the Discord proxy configuration'
     $serverAddress = Read-ServerAddress
     $serverPublicKey = Read-WireGuardPublicKey
+    $userAddress = Read-UserAddress
     $userPrivateKey = Read-WireGuardPrivateKey
 
     $createdFile = $false
@@ -284,14 +296,16 @@ function New-DiscordProxyConfig {
 
         $configuration = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
         $endpoint = @($configuration.endpoints | Where-Object {
+                $null -ne $_.PSObject.Properties['address'] -and
                 $null -ne $_.PSObject.Properties['private_key'] -and
                 $null -ne $_.PSObject.Properties['peers']
             }) | Select-Object -First 1
 
         if ($null -eq $endpoint -or @($endpoint.peers).Count -eq 0) {
-            throw 'The template has no endpoint containing private_key and peers.'
+            throw 'The template has no endpoint containing address, private_key and peers.'
         }
 
+        $endpoint.address[0] = $userAddress + '/32'
         $endpoint.private_key = $userPrivateKey
         $endpoint.peers[0].address = $serverAddress
         $endpoint.peers[0].public_key = $serverPublicKey

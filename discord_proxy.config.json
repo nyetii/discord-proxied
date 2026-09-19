@@ -19,7 +19,7 @@
       "type": "wireguard",
       "tag": "discord-vpn",
       "address": [
-        "10.77.0.2/32"
+        "<INSERT USER IP ADDRESS HERE>"
       ],
       "private_key": "<INSERT PRIVATE KEY HERE>",
       "peers": [
